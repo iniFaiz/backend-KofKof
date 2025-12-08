@@ -14,7 +14,8 @@ N_MELS = 128
 N_FFT = 2048
 HOP_LENGTH = 512
 MAX_PAD_LENGTH = 256
-MODEL_PATH = "cough_classifier_model.h5"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH = os.path.join(BASE_DIR, "cough_classifier_model.h5")
 CLASS_NAMES = ['dry', 'non-cough', 'wet']
 
 # CORS Configuration
