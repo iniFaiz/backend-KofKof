@@ -6,7 +6,11 @@ import soundfile as sf
 import io
 import tempfile
 import tensorflow as tf
-from fastapi import FastAPI, UploadFile, File, HTTPException
+import time
+import csv
+from datetime import datetime
+from collections import defaultdict
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.concurrency import run_in_threadpool
 
@@ -16,9 +20,47 @@ N_MELS = 128
 N_FFT = 2048
 HOP_LENGTH = 512
 MAX_PAD_LENGTH = 256
+MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB Limit
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, "cough_classifier_model.h5")
+LOG_FILE = os.path.join(BASE_DIR, "history_log.csv")
 CLASS_NAMES = ['dry', 'non-cough', 'wet']
+
+# Logging Function (Ethical Logging)
+def log_prediction(filename, prediction, confidence, processing_time):
+    try:
+        file_exists = os.path.isfile(LOG_FILE)
+        with open(LOG_FILE, mode='a', newline='', encoding='utf-8') as file:
+            writer = csv.writer(file)
+            if not file_exists:
+                writer.writerow(['Timestamp', 'Filename', 'Prediction', 'Confidence', 'Processing_Time_Sec'])
+            
+            writer.writerow([
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                filename,
+                prediction,
+                f"{confidence:.4f}",
+                f"{processing_time:.4f}"
+            ])
+    except Exception as e:
+        print(f"Error writing log: {e}")
+
+# Rate Limiter Configuration
+RATE_LIMIT_DURATION = 60  # seconds
+RATE_LIMIT_REQUESTS = 10  # requests per duration
+request_history = defaultdict(list)
+
+def rate_limiter(request: Request):
+    client_ip = request.client.host
+    now = time.time()
+    
+    # Clean old requests
+    request_history[client_ip] = [t for t in request_history[client_ip] if now - t < RATE_LIMIT_DURATION]
+    
+    if len(request_history[client_ip]) >= RATE_LIMIT_REQUESTS:
+        raise HTTPException(status_code=429, detail="Too many requests. Please try again later.")
+    
+    request_history[client_ip].append(now)
 
 # CORS Configuration
 app = FastAPI(
@@ -32,7 +74,8 @@ origins = [
     "http://localhost:8080",
     "http://localhost:8081",
     "http://127.0.0.1:8080",
-    "http://localhost:5173"
+    "http://localhost:5173",
+    "https://kofkof.vercel.app"
 ]
 
 app.add_middleware(
@@ -85,8 +128,9 @@ def preprocess_audio(audio_path: str):
 def read_root():
     return {"status": "Cough Classifier API is running."}
 
-@app.post("/predict")
+@app.post("/predict", dependencies=[Depends(rate_limiter)])
 async def predict_cough(file: UploadFile = File(...)):
+    start_time = time.time()
     if not model:
         return {"error": "Model not loaded."}
     
@@ -99,10 +143,26 @@ async def predict_cough(file: UploadFile = File(...)):
     if not suffix:
         suffix = ".tmp" # Default suffix if none provided
         
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        content = await file.read()
-        tmp.write(content)
-        tmp_path = tmp.name
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            # Baca file secara bertahap (chunk) untuk membatasi ukuran
+            file_size = 0
+            while True:
+                chunk = await file.read(1024 * 1024) # Baca per 1MB
+                if not chunk:
+                    break
+                file_size += len(chunk)
+                if file_size > MAX_FILE_SIZE:
+                    tmp.close()
+                    os.remove(tmp.name)
+                    raise HTTPException(status_code=413, detail="File too large. Maximum size is 5MB.")
+                tmp.write(chunk)
+            tmp_path = tmp.name
+    except Exception as e:
+        # Pastikan file temp terhapus jika ada error saat penulisan
+        if 'tmp_path' in locals() and os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise e
 
     try:
         # Jalankan preprocessing di thread pool agar tidak blocking
@@ -117,6 +177,10 @@ async def predict_cough(file: UploadFile = File(...)):
         predicted_index = np.argmax(prediction)
         predicted_class = CLASS_NAMES[predicted_index]
         confidence = float(np.max(prediction))
+        
+        # Log prediction
+        processing_time = time.time() - start_time
+        log_prediction(file.filename, predicted_class, confidence, processing_time)
         
         return {
             "filename": file.filename,
