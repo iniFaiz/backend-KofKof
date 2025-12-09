@@ -19,3 +19,6 @@ env/
 # IDE settings (Optional)
 .vscode/
 .idea/
+
+# Docker
+Dockerfile
