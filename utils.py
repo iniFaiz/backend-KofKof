@@ -82,6 +82,10 @@ async def validate_file_header(file):
     await file.seek(0) # Reset cursor
     
     is_valid_format = False
+    
+    # WebM
+    if header.startswith(b'\x1A\x45\xDF\xA3'): 
+        is_valid_format = True
     # WAV (RIFF)
     if header.startswith(b'RIFF'): 
         is_valid_format = True
