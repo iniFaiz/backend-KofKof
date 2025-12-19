@@ -50,13 +50,6 @@ def test_predict_invalid_content_type():
     # Test with text file
     files = {'file': ('test.txt', b'text content', 'text/plain')}
     
-    # We expect 400 Bad Request because of content-type check
-    # Note: We don't mock validate_file_header here to test the real logic of content-type check
-    # But validate_file_header is async, and TestClient handles async endpoints.
-    # However, we need to make sure validate_file_header is not mocked if we want to test its logic.
-    # But since we imported 'validate_file_header' in main.py, we can just let it run.
-    # The content-type check is the first thing in validate_file_header.
-    
     response = client.post("/predict", files=files)
     assert response.status_code == 400
     assert "File must be an audio file" in response.json()['detail']
@@ -75,3 +68,27 @@ def test_predict_preprocessing_failure(mock_model, mock_preprocess, mock_validat
     
     assert response.status_code == 200
     assert "Error" in response.json()['error']
+
+@patch('main.model', None)
+def test_predict_model_not_loaded():
+    files = {'file': ('test.wav', b'fake_audio_bytes', 'audio/wav')}
+    response = client.post("/predict", files=files)
+    
+    # Expecting error because model is None
+    assert response.json() == {"error": "Model not loaded."}
+
+@patch('main.validate_file_header', new_callable=AsyncMock)
+def test_predict_file_too_large(mock_validate):
+    mock_validate.return_value = None
+    
+    # Create a large dummy content (> 5MB)
+    # We mock the file read to simulate a large file without actually creating one in memory if possible,
+    # but TestClient handles files differently. 
+    # Instead of creating a 5MB string, let's patch the MAX_FILE_SIZE in main.py
+    
+    with patch('main.MAX_FILE_SIZE', 10): # Set limit to 10 bytes
+        files = {'file': ('large.wav', b'123456789012345', 'audio/wav')}
+        response = client.post("/predict", files=files)
+        
+        assert response.status_code == 413
+        assert "File too large" in response.json()['detail']
